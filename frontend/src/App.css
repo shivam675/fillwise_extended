@@ -1,34 +1,83 @@
-.App-logo {
-    height: 40vmin;
-    pointer-events: none;
+/* Global resets and utility */
+* { box-sizing: border-box; }
+
+.App {
+  min-height: 100vh;
+  background: #F9FAFB;
 }
 
-@media (prefers-reduced-motion: no-preference) {
-    .App-logo {
-        animation: App-logo-spin infinite 20s linear;
-    }
+/* Drag-drop zone */
+.drop-zone {
+  border: 2px dashed #D1D5DB;
+  border-radius: 12px;
+  transition: border-color 0.2s, background 0.2s;
+  cursor: pointer;
+}
+.drop-zone:hover,
+.drop-zone.active {
+  border-color: #18181B;
+  background: #F4F4F5;
+}
+.drop-zone.has-file {
+  border-color: #10B981;
+  background: #ECFDF5;
 }
 
-.App-header {
-    background-color: #0f0f10;
-    min-height: 100vh;
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    font-size: calc(10px + 2vmin);
-    color: white;
+/* Stage list */
+.stage-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 0;
+  border-bottom: 1px solid #F3F4F6;
+  transition: all 0.3s;
+}
+.stage-icon {
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 14px;
+  flex-shrink: 0;
+}
+.stage-icon.pending { background: #F3F4F6; color: #9CA3AF; }
+.stage-icon.active  { background: #18181B; color: #FFFFFF; }
+.stage-icon.done    { background: #10B981; color: #FFFFFF; }
+.stage-icon.failed  { background: #EF4444; color: #FFFFFF; }
+
+/* Confidence badges */
+.badge-high    { background: #D1FAE5; color: #065F46; }
+.badge-medium  { background: #FEF3C7; color: #92400E; }
+.badge-low     { background: #FEE2E2; color: #991B1B; }
+.badge-gen     { background: #DBEAFE; color: #1E40AF; }
+
+/* Animated progress bar */
+@keyframes shimmer {
+  0%   { background-position: -200% 0; }
+  100% { background-position: 200% 0; }
+}
+.progress-shimmer {
+  background: linear-gradient(90deg, #18181B 25%, #3F3F46 50%, #18181B 75%);
+  background-size: 200% 100%;
+  animation: shimmer 1.5s infinite;
 }
 
-.App-link {
-    color: #61dafb;
+/* Entrance animation */
+@keyframes fadeUp {
+  from { opacity: 0; transform: translateY(16px); }
+  to   { opacity: 1; transform: translateY(0); }
 }
+.fade-up { animation: fadeUp 0.4s ease both; }
+.fade-up-1 { animation: fadeUp 0.4s 0.1s ease both; }
+.fade-up-2 { animation: fadeUp 0.4s 0.2s ease both; }
+.fade-up-3 { animation: fadeUp 0.4s 0.3s ease both; }
 
-@keyframes App-logo-spin {
-    from {
-        transform: rotate(0deg);
-    }
-    to {
-        transform: rotate(360deg);
-    }
+/* Pulse for active processing */
+@keyframes pulse-ring {
+  0%   { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(24,24,27,0.4); }
+  70%  { transform: scale(1);    box-shadow: 0 0 0 8px rgba(24,24,27,0); }
+  100% { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(24,24,27,0); }
 }
+.pulse-active { animation: pulse-ring 1.5s infinite; }
