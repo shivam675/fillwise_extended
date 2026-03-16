@@ -1,0 +1,138 @@
+{
+  "identity": {
+    "name": "E1 - The Anti-AI Designer",
+    "tone": "Professional, Precise, Intelligent, Frictionless",
+    "metaphor": "The Digital Scribe",
+    "principles": [
+      "Fusion over Imitation: Mix Swiss Print Design with SaaS Utility.",
+      "Emotion First: The user should feel 'In Control' and 'Enhanced'.",
+      "Content is King: The data (markers) is the hero.",
+      "Negative Space: Use whitespace to reduce cognitive load during configuration."
+    ]
+  },
+  "typography": {
+    "font_family": {
+      "headings": "Manrope, sans-serif",
+      "body": "Inter, sans-serif",
+      "mono": "JetBrains Mono, monospace"
+    },
+    "weights": {
+      "headings": "font-bold (700) or font-extrabold (800)",
+      "body": "font-normal (400)",
+      "medium": "font-medium (500)"
+    },
+    "sizes": {
+      "h1": "text-4xl md:text-5xl tracking-tight leading-tight",
+      "h2": "text-3xl tracking-tight",
+      "h3": "text-2xl font-semibold tracking-normal",
+      "body": "text-base leading-relaxed",
+      "small": "text-sm text-muted-foreground"
+    },
+    "rules": [
+      "Use 'tracking-tight' for all headings larger than 24px.",
+      "Use 'JetBrains Mono' specifically for marker syntax like {$name} or [$instruction].",
+      "Never use 'Inter' for H1 or H2."
+    ]
+  },
+  "colors": {
+    "theme": "light",
+    "palette": {
+      "background": "#F9FAFB",
+      "surface": "#FFFFFF",
+      "primary": "#18181B",
+      "primary_foreground": "#FAFAFA",
+      "secondary": "#F4F4F5",
+      "secondary_foreground": "#18181B",
+      "accent": "#2563EB",
+      "accent_foreground": "#FFFFFF",
+      "muted": "#F4F4F5",
+      "muted_foreground": "#71717A",
+      "border": "#E4E4E7",
+      "input": "#E4E4E7",
+      "ring": "#18181B",
+      "success": "#16A34A",
+      "warning": "#D97706",
+      "error": "#DC2626"
+    },
+    "usage": {
+      "body_bg": "bg-zinc-50 (F9FAFB)",
+      "card_bg": "bg-white border-zinc-200 shadow-sm",
+      "text_main": "text-zinc-950",
+      "text_muted": "text-zinc-500",
+      "primary_action": "bg-zinc-900 hover:bg-zinc-800 text-white",
+      "marker_pill": "bg-blue-50 text-blue-700 border-blue-200"
+    }
+  },
+  "visual_enhancers": {
+    "radius": "rounded-xl",
+    "shadows": {
+      "card": "shadow-[0_2px_8px_rgba(0,0,0,0.04)]",
+      "hover": "shadow-[0_8px_16px_rgba(0,0,0,0.08)]",
+      "float": "shadow-[0_20px_40px_rgba(0,0,0,0.12)]"
+    },
+    "borders": "border border-zinc-200",
+    "glass": "backdrop-blur-xl bg-white/70 border-white/20"
+  },
+  "layout": {
+    "container": "max-w-5xl mx-auto px-6 py-12",
+    "grid_system": "grid grid-cols-1 md:grid-cols-12 gap-8",
+    "spacing": {
+      "section_gap": "gap-12",
+      "component_gap": "gap-6",
+      "internal_padding": "p-6 md:p-8"
+    }
+  },
+  "components": {
+    "wizard_stepper": {
+      "style": "Horizontal clean line with numbered circles.",
+      "active_state": "bg-zinc-900 text-white ring-4 ring-zinc-100",
+      "inactive_state": "bg-white border-2 border-zinc-200 text-zinc-400"
+    },
+    "dropzone": {
+      "style": "Large, dashed border, subtle background animation on hover.",
+      "active": "border-blue-500 bg-blue-50/50",
+      "default": "border-dashed border-2 border-zinc-300 hover:border-zinc-400 hover:bg-zinc-50 transition-all duration-200"
+    },
+    "marker_list": {
+      "style": "Bento grid or Masonry layout of detected markers.",
+      "item": "p-4 rounded-lg border bg-white flex flex-col gap-2"
+    },
+    "ollama_status": {
+      "style": "Floating pill or fixed status bar in the corner.",
+      "connected": "bg-green-100 text-green-700 border-green-200",
+      "disconnected": "bg-red-100 text-red-700 border-red-200"
+    }
+  },
+  "component_paths": {
+    "button": "src/components/ui/button.jsx",
+    "card": "src/components/ui/card.jsx",
+    "input": "src/components/ui/input.jsx",
+    "select": "src/components/ui/select.jsx",
+    "toast": "src/components/ui/sonner.jsx",
+    "progress": "src/components/ui/progress.jsx"
+  },
+  "image_urls": [],
+  "instructions_to_main_agent": [
+    "Install 'lucide-react' for icons.",
+    "Install 'framer-motion' for smooth step transitions.",
+    "Use 'clsx' and 'tailwind-merge' for class handling.",
+    "Ensure all interactive elements have 'data-testid'.",
+    "Ollama URL default is http://localhost:11434.",
+    "Do not use gradients for the main background, keep it clean Zinc-50.",
+    "Use 'Manrope' for all Headings. Import from Google Fonts."
+  ],
+  "UNIVERSAL_GUIDELINES_FOR_MAIN_AGENT": [
+    "Dark colors look good when used independently without gradients. DO NOT use dark colors as gradients.",
+    "Don't make generic centered layouts, simplistic gradients, and uniform styling.",
+    "Create depth through layered design elements with z-index hierarchy.",
+    "Use glass-morphism effects with backdrop filters (12-24px blur).",
+    "You MUST NOT apply universal transition. Eg: 'transition: all'. This results in breaking transforms. Always add transitions for specific interactive elements like button, input excluding transforms.",
+    "You MUST NOT center align the app container, ie do not add '.App { text-align: center; }' in the css file. This disrupts the human natural reading flow of text.",
+    "Always use modern button styles like pill-shaped, or sharp button with interaction animations & color relevant to the app style.",
+    "NEVER: use AI assistant Emoji characters like 🤖🧠 etc for icons.",
+    "Every interaction needs micro-animations - hover states, transitions, parallax effects, and entrance animations. Static = dead.",
+    "Use 2-3x more spacing than feels comfortable. Cramped designs look cheap.",
+    "Subtle grain textures, noise overlays, custom cursors, selection states, and loading animations: separates good from extraordinary.",
+    "Missing categories (especially sponsor logos) = main agent will use placeholder text which is FORBIDDEN."
+  ]
+}
