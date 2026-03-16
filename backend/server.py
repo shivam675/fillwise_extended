@@ -41,8 +41,8 @@ app.add_middleware(
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-STORAGE_DIR = Path("/tmp/docfiller")
-STORAGE_DIR.mkdir(exist_ok=True)
+STORAGE_DIR = Path(tempfile.gettempdir()) / "docfiller"
+STORAGE_DIR.mkdir(exist_ok=True, parents=True)
 
 # In-memory job cache
 jobs: Dict[str, Any] = {}
@@ -195,16 +195,22 @@ def fill_docx_template(template_path: str, output_path: str, replacements: Dict[
 
 def convert_docx_to_pdf(docx_path: str, pdf_path: str) -> bool:
     try:
-        out_dir = str(Path(pdf_path).parent)
-        subprocess.run(
-            ['libreoffice', '--headless', '--convert-to', 'pdf', '--outdir', out_dir, docx_path],
-            timeout=120, capture_output=True, text=True, check=True
-        )
-        expected = Path(out_dir) / f"{Path(docx_path).stem}.pdf"
-        if expected.exists():
-            if str(expected) != pdf_path:
-                shutil.move(str(expected), pdf_path)
-            return True
+        import sys
+        if sys.platform == 'win32':
+            from docx2pdf import convert
+            convert(docx_path, pdf_path)
+            return Path(pdf_path).exists()
+        else:
+            out_dir = str(Path(pdf_path).parent)
+            subprocess.run(
+                ['libreoffice', '--headless', '--convert-to', 'pdf', '--outdir', out_dir, docx_path],
+                timeout=120, capture_output=True, text=True, check=True
+            )
+            expected = Path(out_dir) / f"{Path(docx_path).stem}.pdf"
+            if expected.exists():
+                if str(expected) != pdf_path:
+                    shutil.move(str(expected), pdf_path)
+                return True
     except Exception as e:
         logger.error(f"PDF conversion error: {e}")
     return False

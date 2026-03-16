@@ -234,7 +234,7 @@ export default function App() {
 
   useEffect(() => {
     checkOllama(ollamaUrl);
-  }, []);
+  }, [checkOllama, ollamaUrl]);
 
   // Analyze template when uploaded
   useEffect(() => {
