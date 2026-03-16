@@ -1,0 +1,133 @@
+{
+  "project_name": "DocuGen-AI",
+  "design_philosophy": {
+    "name": "Swiss Utility",
+    "description": "A high-precision, content-first aesthetic that prioritizes clarity, whitespace, and typographic hierarchy. It merges the reliability of enterprise software with the sharpness of Swiss graphic design.",
+    "core_principles": [
+      "Content is King: Data and text are the interface.",
+      "High Contrast: Black text on white/gray backgrounds. No low-contrast gray-on-gray.",
+      "Structural Borders: Use 1px crisp borders to define areas, rather than heavy shadows.",
+      "Feedback is Immediate: Every action has a clear, animated reaction."
+    ]
+  },
+  "typography": {
+    "font_family": {
+      "heading": "Outfit, sans-serif",
+      "body": "Inter, sans-serif",
+      "mono": "JetBrains Mono, monospace"
+    },
+    "scale": {
+      "h1": "text-4xl font-semibold tracking-tight lg:text-5xl",
+      "h2": "text-3xl font-semibold tracking-tight",
+      "h3": "text-2xl font-semibold tracking-tight",
+      "h4": "text-xl font-semibold tracking-tight",
+      "p": "text-base leading-7 text-muted-foreground",
+      "small": "text-sm font-medium leading-none",
+      "tiny": "text-xs font-medium uppercase tracking-wider text-muted-foreground"
+    },
+    "installation_command": "yarn add @fontsource/outfit @fontsource/inter @fontsource/jetbrains-mono"
+  },
+  "colors": {
+    "palette": {
+      "background": "#F9FAFB",
+      "surface": "#FFFFFF",
+      "primary": {
+        "DEFAULT": "#18181B",
+        "foreground": "#FAFAFA"
+      },
+      "secondary": {
+        "DEFAULT": "#F4F4F5",
+        "foreground": "#18181B"
+      },
+      "accent": {
+        "DEFAULT": "#F4F4F5",
+        "foreground": "#18181B"
+      },
+      "muted": {
+        "DEFAULT": "#F4F4F5",
+        "foreground": "#71717A"
+      },
+      "border": "#E4E4E7",
+      "input": "#E4E4E7",
+      "ring": "#18181B",
+      "status": {
+        "success": "#10B981",
+        "warning": "#F59E0B",
+        "error": "#EF4444",
+        "info": "#3B82F6"
+      }
+    },
+    "gradients": {
+      "subtle_fade": "bg-gradient-to-b from-white to-gray-50",
+      "active_glow": "bg-gradient-to-r from-zinc-900 to-zinc-800"
+    }
+  },
+  "layout": {
+    "grid_system": "Use 'container mx-auto px-4 md:px-6 lg:px-8' for main wrappers. Dashboard grid: 'grid grid-cols-1 md:grid-cols-12 gap-6'.",
+    "spacing": {
+      "section_padding": "py-12 md:py-24",
+      "component_gap": "gap-6",
+      "internal_padding": "p-6"
+    },
+    "border_radius": {
+      "default": "rounded-lg",
+      "sm": "rounded-md",
+      "lg": "rounded-xl"
+    },
+    "strategies": {
+      "dashboard": "Bento Grid style. Key stats in large blocks, lists in tall blocks.",
+      "processing": "Centralized, focused single-column view with max-width-2xl.",
+      "approval": "Split view: Left 40% (Context/Source), Right 60% (Form/Action)."
+    }
+  },
+  "components": {
+    "buttons": {
+      "primary": "bg-primary text-primary-foreground hover:bg-primary/90 h-10 px-4 py-2 rounded-md transition-all duration-200 shadow-sm",
+      "secondary": "bg-white text-secondary-foreground border border-input hover:bg-accent hover:text-accent-foreground h-10 px-4 py-2 rounded-md transition-all duration-200 shadow-sm",
+      "ghost": "hover:bg-accent hover:text-accent-foreground h-10 px-4 py-2 rounded-md transition-colors",
+      "destructive": "bg-destructive text-destructive-foreground hover:bg-destructive/90 h-10 px-4 py-2 rounded-md shadow-sm"
+    },
+    "cards": {
+      "default": "bg-card text-card-foreground rounded-xl border border-border shadow-sm",
+      "interactive": "bg-card text-card-foreground rounded-xl border border-border shadow-sm hover:shadow-md transition-all duration-300 cursor-pointer group"
+    },
+    "inputs": {
+      "default": "flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background file:border-0 file:bg-transparent file:text-sm file:font-medium placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50 transition-all duration-200"
+    },
+    "feedback": {
+      "progress_bar": "h-2 w-full bg-secondary rounded-full overflow-hidden",
+      "progress_indicator": "h-full bg-primary transition-all duration-500 ease-in-out",
+      "badge": "inline-flex items-center rounded-full border px-2.5 py-0.5 text-xs font-semibold transition-colors focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2"
+    }
+  },
+  "motion": {
+    "transitions": "transition-all duration-200 ease-in-out",
+    "enter": "animate-in fade-in zoom-in-95 duration-300",
+    "exit": "animate-out fade-out zoom-out-95 duration-200",
+    "hover_lift": "hover:-translate-y-1 transition-transform duration-300"
+  },
+  "icons": {
+    "library": "lucide-react",
+    "style": "stroke-[1.5px] w-5 h-5"
+  },
+  "assets": {
+    "images": []
+  },
+  "instructions_to_main_agent": [
+    "Install dependencies: `yarn add @fontsource/outfit @fontsource/inter @fontsource/jetbrains-mono lucide-react framer-motion clsx tailwind-merge`.",
+    "Configure Tailwind: Update `tailwind.config.js` to include the new fonts and extend the color palette as defined.",
+    "Global Styles: Import the fonts in `index.css` or `App.js`.",
+    "Layout Strategy: Always start with a `Layout` component that includes a top navigation bar and a centered content container.",
+    "Navigation: The top bar should have the App Logo (Left) and a 'New Generation' button (Right) if not on the home page.",
+    "Theme: Strictly enforce Light Mode. Do not implement Dark Mode toggles as per user request.",
+    "Feedback: Use 'sonner' for all toast notifications.",
+    "Data-TestId: Add `data-testid` to every button, input, and card."
+  ],
+  "universal_guidelines": [
+    "Don't make generic centered layouts.",
+    "Create depth through layered design elements.",
+    "Use glass-morphism effects only for sticky headers (backdrop-blur-md bg-white/80).",
+    "NEVER use default browser alerts.",
+    "All forms must have client-side validation with visual error states (red border + text)."
+  ]
+}
