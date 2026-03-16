@@ -2,6 +2,7 @@
 import { Outlet, NavLink } from 'react-router-dom';
 import {
   Home,
+  MessageSquareText,
   FileText,
   File,
   FolderKanban,
@@ -16,6 +17,7 @@ export default function Layout() {
 
   const links = [
     { to: '/', icon: Home, label: 'Dashboard' },
+    { to: '/comment-edit-studio', icon: MessageSquareText, label: 'Comment Edit Studio' },
     { to: '/templates', icon: FileText, label: 'Templates' },
     { to: '/sources', icon: File, label: 'Source Docs' },
     { to: '/projects', icon: FolderKanban, label: 'Projects' },
@@ -46,22 +48,24 @@ export default function Layout() {
           </button>
         </div>
         <nav className="flex-1 space-y-1 p-3">
-          {links.map(l => (
-            <NavLink
-              key={l.to}
-              to={l.to}
-              end={l.to === '/'}
-              className={({ isActive }) =>
-                `group flex items-center rounded-2xl px-3 py-2.5 text-sm font-semibold transition ${
-                  isActive
-                    ? 'bg-sky-900 text-white shadow-[0_10px_24px_-16px_rgba(2,132,199,0.9)]'
-                    : 'text-slate-600 hover:bg-amber-50 hover:text-slate-900'
-                }`
-              }
-            >
-              <l.icon className={`h-5 w-5 ${collapsed ? 'mx-auto' : ''}`} />
-              {!collapsed && <span className="ml-3">{l.label}</span>}
-            </NavLink>
+          {links.map((l, idx) => (
+            <React.Fragment key={l.to}>
+              {idx === 2 ? <div className="my-2 border-t border-amber-100" /> : null}
+              <NavLink
+                to={l.to}
+                end={l.to === '/'}
+                className={({ isActive }) =>
+                  `group flex items-center rounded-2xl px-3 py-2.5 text-sm font-semibold transition ${
+                    isActive
+                      ? 'bg-sky-900 text-white shadow-[0_10px_24px_-16px_rgba(2,132,199,0.9)]'
+                      : 'text-slate-600 hover:bg-amber-50 hover:text-slate-900'
+                  }`
+                }
+              >
+                <l.icon className={`h-5 w-5 ${collapsed ? 'mx-auto' : ''}`} />
+                {!collapsed && <span className="ml-3">{l.label}</span>}
+              </NavLink>
+            </React.Fragment>
           ))}
         </nav>
         <div className="border-t border-amber-100 p-4 text-xs text-slate-500">

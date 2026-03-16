@@ -1,5 +1,5 @@
 ﻿import React, { useState, useEffect, useCallback } from 'react';
-import { FolderKanban, Play, Plus, RefreshCw, Save, Trash2 } from 'lucide-react';
+import { FolderKanban, FolderOpen, Play, Plus, RefreshCw, Save, Trash2 } from 'lucide-react';
 import { apiRequest } from './api';
 import { useNavigate } from 'react-router-dom';
 
@@ -136,6 +136,11 @@ export default function Projects() {
     }
   }
 
+  function openStudio(project) {
+    if (!project.last_job_id) return;
+    navigate(`/projects/${project._id}/edit/${project.last_job_id}`);
+  }
+
   return (
     <div className="space-y-6">
       <div>
@@ -230,9 +235,15 @@ export default function Projects() {
                       <td className="px-4 py-3 text-slate-500">{item.source_name || '-'}</td>
                       <td className="px-4 py-3">
                         <div className="flex justify-end gap-2">
-                          <button className="btn-secondary" onClick={() => startProject(item._id)} disabled={busy}>
-                            <Play className="h-4 w-4" /> Start
-                          </button>
+                          {!item.last_job_id ? (
+                            <button className="btn-secondary" onClick={() => startProject(item._id)} disabled={busy}>
+                              <Play className="h-4 w-4" /> Start
+                            </button>
+                          ) : (
+                            <button className="btn-secondary" onClick={() => openStudio(item)} disabled={busy}>
+                              <FolderOpen className="h-4 w-4" /> Open Studio
+                            </button>
+                          )}
                           <button className="btn-ghost" onClick={() => startEdit(item)} disabled={busy}>
                             <Save className="h-4 w-4" /> Edit
                           </button>
