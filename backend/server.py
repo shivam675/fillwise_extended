@@ -15,6 +15,7 @@ import httpx
 from fastapi import FastAPI, APIRouter, UploadFile, File, Form, HTTPException, BackgroundTasks, Request
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from dotenv import load_dotenv
 from motor.motor_asyncio import AsyncIOMotorClient
@@ -22,9 +23,13 @@ from bson import ObjectId
 from docx import Document
 import pdfplumber
 import mammoth
+from comment_docx_parser import parse_docx_comments
+from comment_docx_editor import apply_edits_and_save
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
+FRONTEND_BUILD_DIR = ROOT_DIR.parent / 'frontend' / 'build'
+FRONTEND_STATIC_DIR = FRONTEND_BUILD_DIR / 'static'
 
 mongo_client = AsyncIOMotorClient(os.environ['MONGO_URL'])
 db = mongo_client[os.environ['DB_NAME']]
@@ -48,6 +53,7 @@ STORAGE_DIR.mkdir(exist_ok=True, parents=True)
 
 # In-memory job cache
 jobs: Dict[str, Any] = {}
+comment_sessions: Dict[str, Any] = {}
 
 
 class ProjectCreate(BaseModel):
@@ -70,6 +76,29 @@ class SettingsPayload(BaseModel):
 
 class ProjectApprovePayload(BaseModel):
     replacements: Dict[str, str] = Field(default_factory=dict)
+
+
+class CommentStudioProcessRequest(BaseModel):
+    session_id: str
+    model: str
+    comment_ids: List[str] | None = None
+    ollama_url: str = "http://localhost:11434"
+
+
+class CommentStudioEditOverride(BaseModel):
+    comment_id: str
+    new_text: str
+    replace_scope: str | None = None
+
+
+class CommentStudioApplyRequest(BaseModel):
+    session_id: str
+    edits: List[CommentStudioEditOverride]
+
+
+class LoginPayload(BaseModel):
+    username: str
+    password: str
 
 
 def parse_object_id(id_value: str) -> ObjectId:
@@ -272,6 +301,63 @@ async def call_ollama(ollama_url: str, model: str, messages: list) -> str:
         )
         resp.raise_for_status()
         return resp.json()['message']['content']
+
+
+def sanitize_plain_text(text: str) -> str:
+    if not text:
+        return ""
+    out = text.strip()
+    if out.startswith("```"):
+        out = re.sub(r"^```[^\n]*\n?", "", out)
+        out = re.sub(r"\n?```$", "", out)
+    out = re.sub(r"(?im)^(Revised text|Final revised full snippet)\s*:\s*", "", out)
+    out = re.sub(r"(?m)^#{1,6}\s+", "", out)
+    out = re.sub(r"\*\*(.*?)\*\*", r"\1", out)
+    out = re.sub(r"__(.*?)__", r"\1", out)
+    return out.strip()
+
+
+async def rewrite_anchor_text(original: str, instruction: str, model: str, ollama_url: str) -> str:
+    prompt = (
+        "You are a professional document editor working on legal/policy text. "
+        "Apply only the requested change to the provided text span. "
+        "Return plain text only, no explanation and no markdown.\n\n"
+        f"Original text:\n{original}\n\n"
+        f"Editor's instruction:\n{instruction}\n\n"
+        "Return only revised text:"
+    )
+    raw = await call_ollama(ollama_url, model, [{"role": "user", "content": prompt}])
+    return sanitize_plain_text(raw)
+
+
+async def rewrite_snippet_with_edit(original_snippet: str, original_span: str, revised_span: str, instruction: str, model: str, ollama_url: str) -> str:
+    prompt = (
+        "You are a professional policy document editor. "
+        "Integrate edited span into the original snippet and return final snippet only.\n\n"
+        f"Original full snippet:\n{original_snippet}\n\n"
+        f"Original anchored span:\n{original_span}\n\n"
+        f"Edited anchored span:\n{revised_span}\n\n"
+        f"Instruction:\n{instruction}\n\n"
+        "Final revised full snippet:"
+    )
+    raw = await call_ollama(ollama_url, model, [{"role": "user", "content": prompt}])
+    return sanitize_plain_text(raw)
+
+
+async def rewrite_snippet_with_comments(original_snippet: str, comments: List[Dict[str, str]], model: str, ollama_url: str) -> str:
+    comments_block = "\n".join(
+        f"- Comment #{c.get('comment_id')}: {c.get('instruction', '')}"
+        for c in comments
+    )
+    prompt = (
+        "You are a professional policy document editor. "
+        "Apply all reviewer comments to the snippet and return one final snippet only.\n\n"
+        f"Original snippet:\n{original_snippet}\n\n"
+        f"Comments:\n{comments_block}\n\n"
+        "Final revised full snippet:"
+    )
+    raw = await call_ollama(ollama_url, model, [{"role": "user", "content": prompt}])
+    return sanitize_plain_text(raw)
 
 
 async def call_ollama_streaming(
@@ -514,6 +600,17 @@ async def health():
     return {"status": "ok"}
 
 
+@api_router.post('/auth/login')
+async def login(data: LoginPayload):
+    configured_user = os.environ.get('APP_LOGIN_USERNAME', 'admin')
+    configured_pass = os.environ.get('APP_LOGIN_PASSWORD', 'admin123')
+
+    if data.username != configured_user or data.password != configured_pass:
+        raise HTTPException(status_code=401, detail='Invalid username or password')
+
+    return {'ok': True, 'username': configured_user}
+
+
 @api_router.get("/check-ollama")
 async def check_ollama(ollama_url: str = "http://localhost:11434"):
     try:
@@ -665,6 +762,221 @@ async def download_file(job_id: str, fmt: str):
 
     return FileResponse(path=fpath, media_type=media, filename=fname,
                         headers={"Content-Disposition": f"attachment; filename={fname}"})
+
+
+@api_router.post('/comment-studio/upload')
+async def upload_comment_studio_docx(file: UploadFile = File(...)):
+    if not (file.filename or '').lower().endswith('.docx'):
+        raise HTTPException(status_code=400, detail='Only .docx files are supported')
+
+    session_id = str(uuid.uuid4())
+    tmp_dir = tempfile.mkdtemp()
+    upload_path = os.path.join(tmp_dir, f'{session_id}_input.docx')
+
+    with open(upload_path, 'wb') as f:
+        f.write(await file.read())
+
+    try:
+        result = parse_docx_comments(upload_path)
+    except Exception as e:
+        raise HTTPException(status_code=422, detail=f'Failed to parse DOCX: {e}')
+
+    comment_sessions[session_id] = {
+        'parse_result': result,
+        'upload_path': upload_path,
+        'tmp_dir': tmp_dir,
+    }
+
+    comments = [
+        {
+            'comment_id': c.comment_id,
+            'author': c.comment_author,
+            'comment_date': c.comment_date,
+            'comment_text': c.comment_text,
+            'anchored_text': c.anchored_text,
+            'source_part': c.source_part,
+            'paragraph_indices': c.paragraph_indices,
+        }
+        for c in result.comments
+    ]
+
+    return {
+        'session_id': session_id,
+        'filename': file.filename,
+        'comment_count': len(comments),
+        'comments': comments,
+    }
+
+
+@api_router.post('/comment-studio/process')
+async def process_comment_studio(req: CommentStudioProcessRequest):
+    session = comment_sessions.get(req.session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail='Session not found. Re-upload the file.')
+
+    parse_result = session['parse_result']
+    anchors = parse_result.comments
+    if req.comment_ids:
+        selected_ids = set(req.comment_ids)
+        anchors = [a for a in anchors if a.comment_id in selected_ids]
+
+    suggestions = []
+    errors = []
+    infos = []
+    para_groups: Dict[tuple, list] = {}
+
+    for a in anchors:
+        if a.paragraph_indices:
+            para_idx = a.paragraph_indices[0]
+            source_part = a.source_part or 'word/document.xml'
+            para_groups.setdefault((source_part, para_idx), []).append(a)
+
+    processed_comment_ids: set[str] = set()
+
+    for _, group in para_groups.items():
+        if len(group) <= 1:
+            continue
+
+        leader = sorted(group, key=lambda a: int(a.comment_id) if str(a.comment_id).isdigit() else 999999)[0]
+        snippet = (leader.context_snippet or '').strip()
+        valid_group = [g for g in group if (g.comment_text or '').strip()]
+
+        if not snippet:
+            for g in group:
+                processed_comment_ids.add(g.comment_id)
+                errors.append({'comment_id': g.comment_id, 'error': 'Missing paragraph context for merged edit'})
+            continue
+
+        try:
+            merged_text = await rewrite_snippet_with_comments(
+                original_snippet=snippet,
+                comments=[{'comment_id': g.comment_id, 'instruction': g.comment_text} for g in valid_group],
+                model=req.model,
+                ollama_url=req.ollama_url,
+            )
+            if not merged_text:
+                raise ValueError('Model returned empty paragraph rewrite')
+
+            comment_summary = ' | '.join(f"#{g.comment_id}: {g.comment_text}" for g in valid_group)
+            suggestions.append({
+                'comment_id': leader.comment_id,
+                'original_text': snippet,
+                'comment': f'Merged paragraph comments: {comment_summary}',
+                'new_text': merged_text,
+                'replace_scope': 'paragraph',
+                'related_comment_ids': [g.comment_id for g in valid_group],
+            })
+            for g in group:
+                processed_comment_ids.add(g.comment_id)
+                if g.comment_id != leader.comment_id:
+                    infos.append({'comment_id': g.comment_id, 'message': f'Merged into paragraph rewrite led by #{leader.comment_id}'})
+        except Exception as e:
+            for g in group:
+                processed_comment_ids.add(g.comment_id)
+                errors.append({'comment_id': g.comment_id, 'error': f'Merged paragraph rewrite failed: {e}'})
+
+    for anchor in anchors:
+        if anchor.comment_id in processed_comment_ids:
+            continue
+        if not (anchor.anchored_text or '').strip():
+            errors.append({'comment_id': anchor.comment_id, 'error': 'No anchored text found'})
+            continue
+        if not (anchor.comment_text or '').strip():
+            errors.append({'comment_id': anchor.comment_id, 'error': 'Comment is empty'})
+            continue
+
+        try:
+            anchor_edit = await rewrite_anchor_text(
+                original=anchor.anchored_text,
+                instruction=anchor.comment_text,
+                model=req.model,
+                ollama_url=req.ollama_url,
+            )
+
+            new_text = anchor_edit
+            replace_scope = 'anchor'
+
+            if anchor.paragraph_indices and anchor.context_snippet:
+                merged = await rewrite_snippet_with_edit(
+                    original_snippet=anchor.context_snippet,
+                    original_span=anchor.anchored_text,
+                    revised_span=anchor_edit,
+                    instruction=anchor.comment_text,
+                    model=req.model,
+                    ollama_url=req.ollama_url,
+                )
+                if merged:
+                    new_text = merged
+                    replace_scope = 'paragraph'
+
+            suggestions.append({
+                'comment_id': anchor.comment_id,
+                'original_text': anchor.anchored_text,
+                'comment': anchor.comment_text,
+                'new_text': new_text,
+                'replace_scope': replace_scope,
+                'related_comment_ids': [anchor.comment_id],
+            })
+        except Exception as e:
+            errors.append({'comment_id': anchor.comment_id, 'error': str(e)})
+
+    session['suggestions'] = {s['comment_id']: s for s in suggestions}
+
+    return {'suggestions': suggestions, 'errors': errors, 'infos': infos}
+
+
+@api_router.post('/comment-studio/apply')
+async def apply_comment_studio(req: CommentStudioApplyRequest):
+    session = comment_sessions.get(req.session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail='Session not found')
+
+    parse_result = session['parse_result']
+    tmp_dir = session['tmp_dir']
+    out_path = os.path.join(tmp_dir, f'{req.session_id}_output.docx')
+    cached_suggestions = session.get('suggestions', {})
+
+    edits = [
+        {
+            'comment_id': e.comment_id,
+            'new_text': e.new_text,
+            'replace_scope': e.replace_scope or 'anchor',
+        }
+        for e in req.edits
+    ]
+
+    resolve_ids: set[str] = set()
+    for e in req.edits:
+        resolve_ids.add(e.comment_id)
+        s = cached_suggestions.get(e.comment_id)
+        if s and isinstance(s.get('related_comment_ids'), list):
+            for cid in s['related_comment_ids']:
+                resolve_ids.add(str(cid))
+
+    try:
+        apply_edits_and_save(
+            all_files=parse_result.all_files,
+            edits=edits,
+            resolve_comment_ids=list(resolve_ids),
+            output_path=out_path,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f'Failed to apply edits: {e}')
+
+    session['output_path'] = out_path
+    return {'download_ready': True, 'session_id': req.session_id}
+
+
+@api_router.get('/comment-studio/download/{session_id}')
+async def download_comment_studio_output(session_id: str):
+    session = comment_sessions.get(session_id)
+    if not session or 'output_path' not in session:
+        raise HTTPException(status_code=404, detail='No output file found for this session.')
+    return FileResponse(
+        session['output_path'],
+        media_type='application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+        filename='edited_document.docx',
+    )
 
 
 @api_router.get('/dashboard/stats')
@@ -1138,6 +1450,28 @@ async def save_settings(data: SettingsPayload):
 
 
 app.include_router(api_router)
+
+
+if FRONTEND_STATIC_DIR.exists():
+    app.mount('/static', StaticFiles(directory=str(FRONTEND_STATIC_DIR)), name='frontend-static')
+
+
+if FRONTEND_BUILD_DIR.exists():
+    @app.get('/', include_in_schema=False)
+    async def serve_frontend_index():
+        return FileResponse(str(FRONTEND_BUILD_DIR / 'index.html'))
+
+
+    @app.get('/{full_path:path}', include_in_schema=False)
+    async def serve_frontend_file_or_spa(full_path: str):
+        if full_path.startswith('api/'):
+            raise HTTPException(status_code=404, detail='Not found')
+
+        requested = FRONTEND_BUILD_DIR / full_path
+        if requested.exists() and requested.is_file():
+            return FileResponse(str(requested))
+
+        return FileResponse(str(FRONTEND_BUILD_DIR / 'index.html'))
 
 
 @app.on_event("shutdown")

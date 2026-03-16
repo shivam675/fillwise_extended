@@ -12,7 +12,7 @@ import {
   Sparkles,
 } from 'lucide-react';
 
-export default function Layout() {
+export default function Layout({ currentUser, onLogout }) {
   const [collapsed, setCollapsed] = useState(false);
 
   const links = [
@@ -69,7 +69,7 @@ export default function Layout() {
           ))}
         </nav>
         <div className="border-t border-amber-100 p-4 text-xs text-slate-500">
-          {!collapsed ? 'Premium Document Intelligence' : 'PDI'}
+          {!collapsed ? 'SLM Labs' : 'SLM'}
         </div>
       </aside>
 
@@ -79,8 +79,13 @@ export default function Layout() {
             <p className="text-xs uppercase tracking-[0.14em] text-slate-500">Workspace</p>
             <p className="text-xl font-bold text-slate-800">Document Refactoring Suite</p>
           </div>
-          <div className="rounded-2xl border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-900">
-            Light Theme
+          <div className="flex items-center gap-2">
+            <div className="rounded-2xl border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-900">
+              {currentUser || 'User'}
+            </div>
+            <button className="btn-ghost" onClick={onLogout} type="button">
+              Logout
+            </button>
           </div>
         </header>
         <section className="page-shell min-h-[calc(100vh-8rem)] p-5 lg:p-7">
