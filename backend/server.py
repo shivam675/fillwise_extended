@@ -1,4 +1,5 @@
 import os
+import asyncio
 import json
 import re
 import uuid
@@ -11,12 +12,13 @@ from datetime import datetime, timezone
 from typing import List, Optional, Dict, Any
 
 import httpx
-from fastapi import FastAPI, APIRouter, UploadFile, File, Form, HTTPException, BackgroundTasks
-from fastapi.responses import FileResponse
+from fastapi import FastAPI, APIRouter, UploadFile, File, Form, HTTPException, BackgroundTasks, Request
+from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from dotenv import load_dotenv
 from motor.motor_asyncio import AsyncIOMotorClient
+from bson import ObjectId
 from docx import Document
 import pdfplumber
 import mammoth
@@ -46,6 +48,49 @@ STORAGE_DIR.mkdir(exist_ok=True, parents=True)
 
 # In-memory job cache
 jobs: Dict[str, Any] = {}
+
+
+class ProjectCreate(BaseModel):
+    name: str = Field(..., min_length=1, max_length=120)
+    template_id: str
+    source_id: str
+    ollama_url: Optional[str] = None
+    model: Optional[str] = None
+
+
+class ProjectStartRequest(BaseModel):
+    ollama_url: Optional[str] = None
+    model: Optional[str] = None
+
+
+class SettingsPayload(BaseModel):
+    ollama_url: str = "http://localhost:11434"
+    default_model: str = "llama3.2:3b"
+
+
+class ProjectApprovePayload(BaseModel):
+    replacements: Dict[str, str] = Field(default_factory=dict)
+
+
+def parse_object_id(id_value: str) -> ObjectId:
+    try:
+        return ObjectId(id_value)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail="Invalid id") from exc
+
+
+def to_public_doc(doc: Dict[str, Any]) -> Dict[str, Any]:
+    pub = dict(doc)
+    if '_id' in pub:
+        pub['_id'] = str(pub['_id'])
+    return pub
+
+
+def apply_replacements_to_text(text: str, replacements: Dict[str, str]) -> str:
+    result = text
+    for marker, value in (replacements or {}).items():
+        result = result.replace(marker, str(value))
+    return result
 
 # Marker regex patterns
 PLACEHOLDER_PATTERN = re.compile(r'\{\$([^}]+)\}')   # {$name}
@@ -229,6 +274,42 @@ async def call_ollama(ollama_url: str, model: str, messages: list) -> str:
         return resp.json()['message']['content']
 
 
+async def call_ollama_streaming(
+    ollama_url: str,
+    model: str,
+    messages: list,
+    on_chunk=None,
+) -> str:
+    chunks: List[str] = []
+    async with httpx.AsyncClient(timeout=300.0) as client:
+        async with client.stream(
+            'POST',
+            f"{ollama_url}/api/chat",
+            json={
+                'model': model,
+                'messages': messages,
+                'stream': True,
+                'options': {'temperature': 0.1}
+            }
+        ) as resp:
+            resp.raise_for_status()
+            async for line in resp.aiter_lines():
+                if not line:
+                    continue
+                try:
+                    payload = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                token = payload.get('message', {}).get('content', '')
+                if token:
+                    chunks.append(token)
+                    if on_chunk is not None:
+                        await on_chunk(''.join(chunks))
+                if payload.get('done'):
+                    break
+    return ''.join(chunks).strip()
+
+
 def extract_json_from_response(text: str) -> dict:
     text = text.strip()
     if text.startswith("```"):
@@ -257,57 +338,18 @@ async def fill_markers_with_ollama(
     if len(source_text) > max_len:
         truncated += "\n\n[... document continues ...]"
 
-    # Build marker descriptions
-    markers_desc = {}
-    for i, m in enumerate(markers):
-        if m['type'] == 'placeholder':
-            markers_desc[f"marker_{i}"] = {
-                "marker": m['marker'],
-                "type": "placeholder",
-                "task": f"Extract the exact value for '{m['name']}' from the source document."
-            }
-        else:
-            markers_desc[f"marker_{i}"] = {
-                "marker": m['marker'],
-                "type": "rule",
-                "task": f"Apply this instruction: {m['instruction']}"
-            }
-
-    system = (
-        "You are an intelligent document-filling agent. "
-        "Analyze the source document and fill template markers exactly as instructed. "
-        "For TYPE 1 ({$placeholder}): extract the exact value, return only the value. "
-        "For TYPE 2 ([$rule]): apply the rule, return only the generated content. "
-        "If info is missing, return 'MISSING: [reason]'. "
-        "Return ONLY valid JSON, nothing else."
-    )
-
-    user_msg = (
-        f"SOURCE DOCUMENT:\n---\n{truncated}\n---\n\n"
-        f"Fill these markers. Return a JSON object with marker IDs as keys:\n"
-        f"{json.dumps(markers_desc, indent=2)}\n\n"
-        f"Return ONLY a JSON object like: {{\"marker_0\": \"value\", \"marker_1\": \"value\", ...}}"
-    )
-
-    # Batch attempt
-    try:
-        raw = await call_ollama(ollama_url, model, [
-            {"role": "system", "content": system},
-            {"role": "user", "content": user_msg}
-        ])
-        result = extract_json_from_response(raw)
-        replacements = {}
-        for i, m in enumerate(markers):
-            key = f"marker_{i}"
-            if key in result:
-                replacements[m['marker']] = str(result[key])
-        if replacements:
-            return replacements
-    except Exception as e:
-        logger.warning(f"Batch LLM failed ({e}), falling back to individual calls")
-
-    # Individual fallback
+    # Marker-by-marker streaming allows live typing visualization in the editor page.
     replacements = {}
+
+    if job_id in jobs:
+        jobs[job_id]['stream'] = {
+            'is_streaming': True,
+            'current_marker': None,
+            'current_text': '',
+            'marker_index': 0,
+            'total_markers': len(markers),
+        }
+
     for i, m in enumerate(markers):
         try:
             if m['type'] == 'placeholder':
@@ -322,10 +364,27 @@ async def fill_markers_with_ollama(
                     f"Apply this instruction: {m['instruction']}\n"
                     f"Return ONLY the result, nothing else."
                 )
-            value = await call_ollama(ollama_url, model, [
-                {"role": "system", "content": "You are a document analyst. Return only the requested content, no explanation."},
-                {"role": "user", "content": prompt}
-            ])
+
+            async def on_chunk(partial_text: str):
+                if job_id in jobs:
+                    jobs[job_id]['stream'] = {
+                        'is_streaming': True,
+                        'current_marker': m['marker'],
+                        'current_text': partial_text,
+                        'marker_index': i + 1,
+                        'total_markers': len(markers),
+                    }
+
+            value = await call_ollama_streaming(
+                ollama_url,
+                model,
+                [
+                    {"role": "system", "content": "You are a document analyst. Return only the requested content, no explanation."},
+                    {"role": "user", "content": prompt}
+                ],
+                on_chunk=on_chunk,
+            )
+
             replacements[m['marker']] = value.strip()
         except Exception as e2:
             logger.error(f"Individual fill failed for {m['marker']}: {e2}")
@@ -337,9 +396,25 @@ async def fill_markers_with_ollama(
             jobs[job_id].update({
                 'progress': progress,
                 'markers_filled': i + 1,
-                'message': f'Filled {i+1}/{len(markers)} markers...'
+                'message': f'Filled {i+1}/{len(markers)} markers...',
+                'stream': {
+                    'is_streaming': True,
+                    'current_marker': m['marker'],
+                    'current_text': replacements[m['marker']],
+                    'marker_index': i + 1,
+                    'total_markers': len(markers),
+                }
             })
             await update_job(job_id)
+
+    if job_id in jobs:
+        jobs[job_id]['stream'] = {
+            'is_streaming': False,
+            'current_marker': None,
+            'current_text': '',
+            'marker_index': len(markers),
+            'total_markers': len(markers),
+        }
 
     return replacements
 
@@ -361,7 +436,8 @@ async def update_job(job_id: str):
 async def process_job(
     job_id: str, source_path: str, source_filename: str,
     template_path: str, template_filename: str,
-    ollama_url: str, model: str
+    ollama_url: str, model: str,
+    cleanup_inputs: bool = True
 ):
     start = datetime.now(timezone.utc)
     try:
@@ -377,6 +453,7 @@ async def process_job(
 
         markers = scan_docx_for_markers(template_path)
         jobs[job_id].update({
+            'markers': markers,
             'markers_found': len(markers),
             'message': f'Found {len(markers)} marker(s). Filling with AI...',
             'progress': 20
@@ -386,6 +463,8 @@ async def process_job(
         replacements = await fill_markers_with_ollama(
             source_text, markers, ollama_url, model, job_id
         )
+        jobs[job_id].update({'replacements': replacements})
+        await update_job(job_id)
 
         jobs[job_id].update({'message': 'Writing filled document...', 'progress': 92})
         await update_job(job_id)
@@ -419,12 +498,13 @@ async def process_job(
         jobs[job_id].update({'status': 'error', 'message': 'Processing failed', 'error': str(e), 'progress': 0})
         await update_job(job_id)
     finally:
-        for p in [source_path, template_path]:
-            try:
-                if os.path.exists(p):
-                    os.remove(p)
-            except Exception:
-                pass
+        if cleanup_inputs:
+            for p in [source_path, template_path]:
+                try:
+                    if os.path.exists(p):
+                        os.remove(p)
+                except Exception:
+                    pass
 
 
 # ─── API Routes ───────────────────────────────────────────────────────────────
@@ -587,9 +667,480 @@ async def download_file(job_id: str, fmt: str):
                         headers={"Content-Disposition": f"attachment; filename={fname}"})
 
 
+@api_router.get('/dashboard/stats')
+async def get_dashboard_stats():
+    total_jobs = await db.jobs.count_documents({})
+    running_jobs = await db.jobs.count_documents({'status': {'$in': ['pending', 'processing']}})
+    return {
+        'templates': await db.templates.count_documents({}),
+        'sources': await db.sources.count_documents({}),
+        'projects': await db.projects.count_documents({}),
+        'jobs': total_jobs,
+        'running_jobs': running_jobs,
+        'users': 1,
+    }
+
+
+@api_router.get('/templates')
+async def get_templates():
+    docs = []
+    async for t in db.templates.find().sort('created_at', -1):
+        docs.append(to_public_doc(t))
+    return docs
+
+
+@api_router.post('/templates')
+async def create_template(name: str = Form(...), file: UploadFile = File(...)):
+    if not file.filename.lower().endswith('.docx'):
+        raise HTTPException(status_code=400, detail='Template must be a .docx file')
+
+    templates_dir = STORAGE_DIR / 'library' / 'templates'
+    templates_dir.mkdir(parents=True, exist_ok=True)
+    ext = Path(file.filename).suffix.lower()
+    stored_name = f"{uuid.uuid4()}{ext}"
+    file_path = templates_dir / stored_name
+    with open(file_path, 'wb') as out_file:
+        out_file.write(await file.read())
+
+    res = await db.templates.insert_one({
+        'name': name,
+        'filename': file.filename,
+        'stored_filename': stored_name,
+        'path': str(file_path),
+        'size': file_path.stat().st_size,
+        'created_at': datetime.now(timezone.utc)
+    })
+    return {'id': str(res.inserted_id), 'name': name}
+
+
+@api_router.put('/templates/{template_id}')
+async def update_template(
+    template_id: str,
+    name: Optional[str] = Form(None),
+    file: Optional[UploadFile] = File(None)
+):
+    oid = parse_object_id(template_id)
+    doc = await db.templates.find_one({'_id': oid})
+    if not doc:
+        raise HTTPException(status_code=404, detail='Template not found')
+
+    update: Dict[str, Any] = {}
+    if name:
+        update['name'] = name
+
+    if file is not None:
+        if not file.filename.lower().endswith('.docx'):
+            raise HTTPException(status_code=400, detail='Template must be a .docx file')
+        templates_dir = STORAGE_DIR / 'library' / 'templates'
+        templates_dir.mkdir(parents=True, exist_ok=True)
+        ext = Path(file.filename).suffix.lower()
+        stored_name = f"{uuid.uuid4()}{ext}"
+        file_path = templates_dir / stored_name
+        with open(file_path, 'wb') as out_file:
+            out_file.write(await file.read())
+        update.update({
+            'filename': file.filename,
+            'stored_filename': stored_name,
+            'path': str(file_path),
+            'size': file_path.stat().st_size
+        })
+        old_path = doc.get('path')
+        if old_path and Path(old_path).exists():
+            try:
+                os.remove(old_path)
+            except Exception:
+                logger.warning(f'Could not remove old template file: {old_path}')
+
+    if not update:
+        raise HTTPException(status_code=400, detail='Nothing to update')
+
+    await db.templates.update_one({'_id': oid}, {'$set': update})
+    return {'status': 'ok'}
+
+
+@api_router.delete('/templates/{template_id}')
+async def delete_template(template_id: str):
+    oid = parse_object_id(template_id)
+    doc = await db.templates.find_one({'_id': oid})
+    if not doc:
+        raise HTTPException(status_code=404, detail='Template not found')
+    await db.templates.delete_one({'_id': oid})
+    file_path = doc.get('path')
+    if file_path and Path(file_path).exists():
+        try:
+            os.remove(file_path)
+        except Exception:
+            logger.warning(f'Could not remove template file: {file_path}')
+    return {'status': 'ok'}
+
+
+@api_router.get('/sources')
+async def get_sources():
+    docs = []
+    async for s in db.sources.find().sort('created_at', -1):
+        docs.append(to_public_doc(s))
+    return docs
+
+
+@api_router.post('/sources')
+async def create_source(name: str = Form(...), file: UploadFile = File(...)):
+    ext = Path(file.filename).suffix.lower()
+    if ext not in ['.pdf', '.doc', '.docx']:
+        raise HTTPException(status_code=400, detail='Source must be PDF, DOC, or DOCX')
+
+    sources_dir = STORAGE_DIR / 'library' / 'sources'
+    sources_dir.mkdir(parents=True, exist_ok=True)
+    stored_name = f"{uuid.uuid4()}{ext}"
+    file_path = sources_dir / stored_name
+    with open(file_path, 'wb') as out_file:
+        out_file.write(await file.read())
+
+    res = await db.sources.insert_one({
+        'name': name,
+        'filename': file.filename,
+        'stored_filename': stored_name,
+        'path': str(file_path),
+        'size': file_path.stat().st_size,
+        'created_at': datetime.now(timezone.utc)
+    })
+    return {'id': str(res.inserted_id), 'name': name}
+
+
+@api_router.put('/sources/{source_id}')
+async def update_source(
+    source_id: str,
+    name: Optional[str] = Form(None),
+    file: Optional[UploadFile] = File(None)
+):
+    oid = parse_object_id(source_id)
+    doc = await db.sources.find_one({'_id': oid})
+    if not doc:
+        raise HTTPException(status_code=404, detail='Source not found')
+
+    update: Dict[str, Any] = {}
+    if name:
+        update['name'] = name
+
+    if file is not None:
+        ext = Path(file.filename).suffix.lower()
+        if ext not in ['.pdf', '.doc', '.docx']:
+            raise HTTPException(status_code=400, detail='Source must be PDF, DOC, or DOCX')
+        sources_dir = STORAGE_DIR / 'library' / 'sources'
+        sources_dir.mkdir(parents=True, exist_ok=True)
+        stored_name = f"{uuid.uuid4()}{ext}"
+        file_path = sources_dir / stored_name
+        with open(file_path, 'wb') as out_file:
+            out_file.write(await file.read())
+        update.update({
+            'filename': file.filename,
+            'stored_filename': stored_name,
+            'path': str(file_path),
+            'size': file_path.stat().st_size
+        })
+        old_path = doc.get('path')
+        if old_path and Path(old_path).exists():
+            try:
+                os.remove(old_path)
+            except Exception:
+                logger.warning(f'Could not remove old source file: {old_path}')
+
+    if not update:
+        raise HTTPException(status_code=400, detail='Nothing to update')
+
+    await db.sources.update_one({'_id': oid}, {'$set': update})
+    return {'status': 'ok'}
+
+
+@api_router.delete('/sources/{source_id}')
+async def delete_source(source_id: str):
+    oid = parse_object_id(source_id)
+    doc = await db.sources.find_one({'_id': oid})
+    if not doc:
+        raise HTTPException(status_code=404, detail='Source not found')
+    await db.sources.delete_one({'_id': oid})
+    file_path = doc.get('path')
+    if file_path and Path(file_path).exists():
+        try:
+            os.remove(file_path)
+        except Exception:
+            logger.warning(f'Could not remove source file: {file_path}')
+    return {'status': 'ok'}
+
+
+@api_router.get('/projects')
+async def get_projects():
+    templates: Dict[str, str] = {}
+    async for t in db.templates.find({}, {'name': 1}):
+        templates[str(t['_id'])] = t.get('name', 'Unknown template')
+
+    sources: Dict[str, str] = {}
+    async for s in db.sources.find({}, {'name': 1}):
+        sources[str(s['_id'])] = s.get('name', 'Unknown source')
+
+    docs = []
+    async for p in db.projects.find().sort('created_at', -1):
+        item = to_public_doc(p)
+        item['template_name'] = templates.get(item.get('template_id', ''), 'Unknown template')
+        item['source_name'] = sources.get(item.get('source_id', ''), 'Unknown source')
+        docs.append(item)
+    return docs
+
+
+@api_router.post('/projects')
+async def create_project(data: ProjectCreate):
+    template = await db.templates.find_one({'_id': parse_object_id(data.template_id)})
+    if not template:
+        raise HTTPException(status_code=404, detail='Template not found')
+    source = await db.sources.find_one({'_id': parse_object_id(data.source_id)})
+    if not source:
+        raise HTTPException(status_code=404, detail='Source not found')
+
+    payload = data.model_dump()
+    payload.update({
+        'status': 'idle',
+        'last_job_id': None,
+        'created_at': datetime.now(timezone.utc)
+    })
+    res = await db.projects.insert_one(payload)
+    return {'id': str(res.inserted_id)}
+
+
+@api_router.put('/projects/{project_id}')
+async def update_project(project_id: str, data: ProjectCreate):
+    project_oid = parse_object_id(project_id)
+    template = await db.templates.find_one({'_id': parse_object_id(data.template_id)})
+    if not template:
+        raise HTTPException(status_code=404, detail='Template not found')
+    source = await db.sources.find_one({'_id': parse_object_id(data.source_id)})
+    if not source:
+        raise HTTPException(status_code=404, detail='Source not found')
+
+    await db.projects.update_one(
+        {'_id': project_oid},
+        {'$set': {**data.model_dump(), 'updated_at': datetime.now(timezone.utc)}}
+    )
+    return {'status': 'ok'}
+
+
+@api_router.delete('/projects/{project_id}')
+async def delete_project(project_id: str):
+    project_oid = parse_object_id(project_id)
+    await db.projects.delete_one({'_id': project_oid})
+    return {'status': 'ok'}
+
+
+@api_router.post('/projects/{project_id}/start')
+async def start_project(project_id: str, background_tasks: BackgroundTasks, payload: ProjectStartRequest):
+    project_oid = parse_object_id(project_id)
+    project = await db.projects.find_one({'_id': project_oid})
+    if not project:
+        raise HTTPException(status_code=404, detail='Project not found')
+
+    template = await db.templates.find_one({'_id': parse_object_id(project['template_id'])})
+    source = await db.sources.find_one({'_id': parse_object_id(project['source_id'])})
+    if not template or not source:
+        raise HTTPException(status_code=400, detail='Project has missing template/source')
+
+    template_path = template.get('path')
+    source_path = source.get('path')
+    if not template_path or not source_path or not Path(template_path).exists() or not Path(source_path).exists():
+        raise HTTPException(status_code=400, detail='Template or source file is unavailable on disk')
+
+    saved_settings = await db.settings.find_one({}) or {}
+    ollama_url = payload.ollama_url or project.get('ollama_url') or saved_settings.get('ollama_url') or 'http://localhost:11434'
+    model = payload.model or project.get('model') or saved_settings.get('default_model') or 'llama3.2:3b'
+
+    job_id = str(uuid.uuid4())
+    src_ext = Path(source.get('filename', '')).suffix.lower() or '.pdf'
+    source_tmp = str(STORAGE_DIR / f"{job_id}_source{src_ext}")
+    template_tmp = str(STORAGE_DIR / f"{job_id}_template.docx")
+    shutil.copyfile(source_path, source_tmp)
+    shutil.copyfile(template_path, template_tmp)
+
+    jobs[job_id] = {
+        'job_id': job_id,
+        'status': 'pending',
+        'progress': 0,
+        'message': 'Job queued...',
+        'markers_found': 0,
+        'markers_filled': 0,
+        'source_filename': source.get('filename', 'source.docx'),
+        'template_filename': template.get('filename', 'template.docx'),
+        'processing_time': None,
+        'error': None,
+        'project_id': project_id,
+        'created_at': datetime.now(timezone.utc)
+    }
+    await update_job(job_id)
+
+    await db.projects.update_one(
+        {'_id': project_oid},
+        {'$set': {'status': 'processing', 'last_job_id': job_id, 'updated_at': datetime.now(timezone.utc)}}
+    )
+
+    background_tasks.add_task(
+        process_job, job_id=job_id,
+        source_path=source_tmp, source_filename=source.get('filename', 'source.docx'),
+        template_path=template_tmp, template_filename=template.get('filename', 'template.docx'),
+        ollama_url=ollama_url, model=model,
+        cleanup_inputs=True
+    )
+    return {'job_id': job_id, 'status': 'pending'}
+
+
+@api_router.get('/projects/{project_id}/editor/{job_id}')
+async def get_project_editor_payload(project_id: str, job_id: str):
+    project = await db.projects.find_one({'_id': parse_object_id(project_id)})
+    if not project:
+        raise HTTPException(status_code=404, detail='Project not found')
+
+    template = await db.templates.find_one({'_id': parse_object_id(project['template_id'])})
+    if not template:
+        raise HTTPException(status_code=404, detail='Template not found')
+
+    template_path = template.get('path')
+    if not template_path or not Path(template_path).exists():
+        raise HTTPException(status_code=400, detail='Template file is unavailable on disk')
+
+    template_text = extract_text_from_docx(template_path)
+
+    job = jobs.get(job_id)
+    if not job:
+        job = await db.jobs.find_one({'job_id': job_id}, {'_id': 0})
+    if not job:
+        raise HTTPException(status_code=404, detail='Job not found')
+
+    replacements = job.get('approved_replacements') or job.get('replacements') or {}
+    markers = job.get('markers') or scan_docx_for_markers(template_path)
+
+    return {
+        'project_id': project_id,
+        'job_id': job_id,
+        'project_name': project.get('name', 'Project'),
+        'status': job.get('status', 'pending'),
+        'message': job.get('message', ''),
+        'progress': job.get('progress', 0),
+        'template_name': template.get('name', ''),
+        'template_text': template_text,
+        'markers': markers,
+        'replacements': replacements,
+        'preview_text': apply_replacements_to_text(template_text, replacements),
+        'stream': job.get('stream', {}),
+        'has_docx': (STORAGE_DIR / job_id / 'filled_document.docx').exists(),
+        'has_pdf': (STORAGE_DIR / job_id / 'filled_document.pdf').exists(),
+        'approved': bool(job.get('approved', False)),
+    }
+
+
+@api_router.get('/projects/{project_id}/editor/{job_id}/stream')
+async def stream_project_editor(project_id: str, job_id: str, request: Request):
+    async def event_generator():
+        while True:
+            if await request.is_disconnected():
+                break
+
+            job = jobs.get(job_id)
+            if not job:
+                db_job = await db.jobs.find_one({'job_id': job_id}, {'_id': 0})
+                if not db_job:
+                    payload = {'error': 'Job not found', 'job_id': job_id}
+                    yield f"data: {json.dumps(payload)}\n\n"
+                    break
+                job = db_job
+
+            payload = {
+                'job_id': job_id,
+                'status': job.get('status', 'pending'),
+                'progress': job.get('progress', 0),
+                'message': job.get('message', ''),
+                'markers_filled': job.get('markers_filled', 0),
+                'markers_found': job.get('markers_found', 0),
+                'stream': job.get('stream', {}),
+            }
+            yield f"data: {json.dumps(payload)}\n\n"
+
+            if payload['status'] in ('done', 'error') and not payload['stream'].get('is_streaming', False):
+                break
+
+            await asyncio.sleep(0.45)
+
+    return StreamingResponse(event_generator(), media_type='text/event-stream')
+
+
+@api_router.post('/projects/{project_id}/editor/{job_id}/approve')
+async def approve_project_changes(project_id: str, job_id: str, payload: ProjectApprovePayload):
+    project = await db.projects.find_one({'_id': parse_object_id(project_id)})
+    if not project:
+        raise HTTPException(status_code=404, detail='Project not found')
+
+    template = await db.templates.find_one({'_id': parse_object_id(project['template_id'])})
+    if not template:
+        raise HTTPException(status_code=404, detail='Template not found')
+
+    template_path = template.get('path')
+    if not template_path or not Path(template_path).exists():
+        raise HTTPException(status_code=400, detail='Template file is unavailable on disk')
+
+    job_dir = STORAGE_DIR / job_id
+    job_dir.mkdir(parents=True, exist_ok=True)
+
+    docx_out = str(job_dir / 'filled_document.docx')
+    fill_docx_template(template_path, docx_out, payload.replacements)
+    pdf_out = str(job_dir / 'filled_document.pdf')
+    has_pdf = convert_docx_to_pdf(docx_out, pdf_out)
+
+    if job_id in jobs:
+        jobs[job_id].update({
+            'approved': True,
+            'approved_replacements': payload.replacements,
+            'status': 'done',
+            'message': 'Approved and finalized by user',
+            'has_pdf': has_pdf,
+            'docx_path': docx_out,
+            'pdf_path': pdf_out if has_pdf else None
+        })
+        await update_job(job_id)
+    else:
+        await db.jobs.update_one(
+            {'job_id': job_id},
+            {
+                '$set': {
+                    'approved': True,
+                    'approved_replacements': payload.replacements,
+                    'status': 'done',
+                    'message': 'Approved and finalized by user',
+                    'has_pdf': has_pdf,
+                }
+            },
+            upsert=True
+        )
+
+    await db.projects.update_one(
+        {'_id': parse_object_id(project_id)},
+        {'$set': {'status': 'approved', 'last_job_id': job_id, 'updated_at': datetime.now(timezone.utc)}}
+    )
+
+    return {'status': 'ok', 'has_docx': True, 'has_pdf': has_pdf}
+
+
+@api_router.get('/settings')
+async def get_settings():
+    s = await db.settings.find_one({})
+    if not s:
+        return {'ollama_url': 'http://localhost:11434', 'default_model': 'llama3.2:3b'}
+    return {**s, '_id': str(s['_id'])}
+
+
+@api_router.post('/settings')
+async def save_settings(data: SettingsPayload):
+    await db.settings.update_one({}, {'$set': data.model_dump()}, upsert=True)
+    return {'status': 'ok'}
+
+
 app.include_router(api_router)
 
 
 @app.on_event("shutdown")
 async def shutdown():
     mongo_client.close()
+
