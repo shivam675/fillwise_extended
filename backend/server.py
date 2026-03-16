@@ -536,11 +536,15 @@ async def get_job(job_id: str):
         data = {k: v for k, v in job.items() if k not in ('docx_path', 'pdf_path')}
         if isinstance(data.get('created_at'), datetime):
             data['created_at'] = data['created_at'].isoformat()
-        data['has_docx'] = bool(job.get('docx_path') and os.path.exists(job['docx_path']))
-        data['has_pdf'] = bool(job.get('pdf_path') and os.path.exists(job.get('pdf_path', '')))
+        job_dir = STORAGE_DIR / job_id
+        data['has_docx'] = (job_dir / "filled_document.docx").exists()
+        data['has_pdf'] = (job_dir / "filled_document.pdf").exists()
         return data
     job = await db.jobs.find_one({'job_id': job_id}, {'_id': 0})
     if job:
+        job_dir = STORAGE_DIR / job_id
+        job['has_docx'] = (job_dir / "filled_document.docx").exists()
+        job['has_pdf'] = (job_dir / "filled_document.pdf").exists()
         return job
     raise HTTPException(status_code=404, detail="Job not found")
 
@@ -549,22 +553,28 @@ async def get_job(job_id: str):
 async def download_file(job_id: str, fmt: str):
     if fmt not in ('docx', 'pdf'):
         raise HTTPException(status_code=400, detail="Format must be 'docx' or 'pdf'")
+
+    # Check in-memory cache first, then MongoDB
     job = jobs.get(job_id)
+    if not job:
+        job = await db.jobs.find_one({'job_id': job_id}, {'_id': 0})
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
     if job.get('status') != 'done':
         raise HTTPException(status_code=400, detail="Job not completed")
 
+    # Derive file paths from job_id (predictable pattern, survives server restart)
+    job_dir = STORAGE_DIR / job_id
     if fmt == 'docx':
-        fpath = job.get('docx_path')
+        fpath = str(job_dir / "filled_document.docx")
         media = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
         fname = 'filled_document.docx'
     else:
-        fpath = job.get('pdf_path')
+        fpath = str(job_dir / "filled_document.pdf")
         media = 'application/pdf'
         fname = 'filled_document.pdf'
 
-    if not fpath or not os.path.exists(fpath):
+    if not os.path.exists(fpath):
         raise HTTPException(status_code=404, detail=f"{fmt.upper()} file not available")
 
     return FileResponse(path=fpath, media_type=media, filename=fname,
