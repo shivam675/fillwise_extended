@@ -21,7 +21,7 @@ Write-Host "[2/4] Installing PyInstaller if missing..."
 Invoke-CheckedCommand "python -m pip install --upgrade pyinstaller"
 
 Write-Host "[2.5/4] Checking for incompatible enum34 package..."
-python -m pip show enum34 *> $null
+python -c "import importlib.metadata,sys;`ntry:`n importlib.metadata.version('enum34'); sys.exit(0)`nexcept importlib.metadata.PackageNotFoundError:`n sys.exit(1)"
 if ($LASTEXITCODE -eq 0) {
   Write-Host "enum34 detected. Removing it to avoid PyInstaller failure..."
   Invoke-CheckedCommand "python -m pip uninstall -y enum34"
